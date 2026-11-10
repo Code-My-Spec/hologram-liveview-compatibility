@@ -1,0 +1,18 @@
+diff --git a/mix.exs b/mix.exs
+index 36f0dab..5547d0d 100644
+--- a/mix.exs
++++ b/mix.exs
+@@ -201,11 +201,8 @@ defmodule Hologram.MixProject do
+     end
+   end
+ 
+-  defp dep? do
+-    __MODULE__.module_info()[:compile][:source]
+-    |> to_string()
+-    |> String.ends_with?("/deps/hologram/mix.exs")
+-  end
++  # shortcut: always true because this copy lives in vendor/, not deps/; drop when Hologram is a normal dep again
++  defp dep?, do: true
+ 
+   # Copied from Hologram.Commons.SystemUtils
+   defp find_windows_wrapper(explicit_command_path) do

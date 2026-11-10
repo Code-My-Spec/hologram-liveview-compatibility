@@ -1,0 +1,115 @@
+name: Build & Push image
+
+# The deploy pulls the image CI built for a specific commit rather than
+# building on the deploy machine, so "what is running in production" always
+# has an answer traceable to a commit.
+#
+# Two native runners rather than one QEMU build: the deploy boxes are a mix of
+# architectures (Hetzner's cax line is ARM64, cx/cpx are amd64) and an image
+# built for the wrong one starts and immediately dies. QEMU cross-building
+# works but is several times slower, so each platform builds on its own
+# runner and the digests are merged into one manifest list at the end.
+
+on:
+  push:
+    branches: [main, master]
+    paths-ignore:
+      - "**.md"
+      - ".kamal/**"
+      - "config/deploy*.yml"
+      - "bin/**"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: write
+
+# <GITHUB_OWNER> is deliberately literal, not an EEx tag: no repository exists
+# yet at generation time to have an owner. CodeMySpec's :repository
+# provisioning step substitutes it once the real repository (or org) is
+# known — see CodeMySpec.Provisioning.Repository. A project generated outside
+# that pipeline should replace it with its own GitHub username or org by hand.
+env:
+  IMAGE: ghcr.io/<GITHUB_OWNER>/hologram_liveview_spike
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          labels: |
+            service=hologram_liveview_spike
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+          cache-to: type=registry,ref=${{ env.IMAGE }}:buildcache-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }},mode=max
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The commit SHA tag is what `bin/deploy` asks for by name, so the image
+      # and the commit cannot drift apart.
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            -t ${{ env.IMAGE }}:${{ github.sha }} \
+            -t ${{ env.IMAGE }}:latest \
+            $(printf '${{ env.IMAGE }}@sha256:%s ' *)
+
+      - name: Inspect image
+        run: docker buildx imagetools inspect ${{ env.IMAGE }}:${{ github.sha }}

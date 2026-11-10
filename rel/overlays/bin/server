@@ -1,0 +1,51 @@
+#!/bin/sh
+# Release overlay: turn the age key into an environment, then start the app
+# with the web endpoint actually serving.
+#
+# Two jobs, both of which a stock release gets wrong for this deployment shape.
+#
+# 1. `mix release` builds a `start` that boots the application and nothing else
+#    — Phoenix reads `PHX_SERVER` at runtime and only starts the endpoint when
+#    it is set. Without that a container comes up, reports healthy to nothing,
+#    and refuses every connection, because the supervision tree is running and
+#    the web server was never asked for.
+#
+# 2. Setup encrypts each environment's secrets into `envs/<env>.enc.env`,
+#    commits the ciphertext, and hands the container exactly one secret —
+#    SOPS_AGE_KEY, that environment's own private key. Per-environment keys
+#    mean UAT's cannot open production's, so being able to deploy UAT discloses
+#    nothing about production. Nothing else performs the decryption: the image
+#    carries the ciphertext and the container carries the key, and until this
+#    wrapper existed the release read neither. The app raised "environment
+#    variable DATABASE_URL is missing" at boot, the proxy waited out its health
+#    timeout, and the deploy reported a failed traffic swap — naming the swap,
+#    which was not the thing that was wrong.
+#
+# The Dockerfile's CMD names this file. An image without it starts and dies:
+#
+#   exec: "/app/bin/server": stat /app/bin/server: no such file or directory
+set -eu
+cd -P -- "$(dirname -- "$0")"
+
+ENV_NAME="${APP_ENV:-prod}"
+ENV_FILE="../envs/${ENV_NAME}.enc.env"
+
+if [ ! -f "$ENV_FILE" ]; then
+  echo "server: no envs/${ENV_NAME}.enc.env in this image — setup encrypts one per environment" >&2
+  echo "server: APP_ENV=${ENV_NAME}; the image holds: $(ls ../envs 2>/dev/null | tr '\n' ' ')" >&2
+  exit 1
+fi
+
+# By name, before sops is asked to do anything. An absent key makes sops fail
+# with "no identity matched any of the recipients", which reads as the file
+# being encrypted to someone else rather than as nobody having supplied a key.
+if [ -z "${SOPS_AGE_KEY:-}" ]; then
+  echo "server: SOPS_AGE_KEY is not set, so ${ENV_FILE} cannot be decrypted" >&2
+  echo "server: the deploy carries it to the host — see config/deploy*.yml env.secret" >&2
+  exit 1
+fi
+
+# `exec` so the release is PID 1 and receives the signals a container stop
+# sends. Running it as a child would leave the stop waiting on a process that
+# never hears it.
+exec sops exec-env "$ENV_FILE" "PHX_SERVER=true ./hologram_liveview_spike start"

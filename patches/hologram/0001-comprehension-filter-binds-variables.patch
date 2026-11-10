@@ -1,0 +1,37 @@
+diff --git a/assets/js/interpreter.mjs b/assets/js/interpreter.mjs
+index af0dbfc..ea99039 100644
+--- a/assets/js/interpreter.mjs
++++ b/assets/js/interpreter.mjs
+@@ -2726,8 +2726,13 @@ export default class Interpreter {
+     const qualifier = qualifiers[index];
+ 
+     if (qualifier.type === "filter") {
+-      if (Type.isTruthy(qualifier.filter(context))) {
+-        Interpreter.#walkComprehension(qualifiers, index + 1, context, onLeaf);
++      // shortcut: patched for spike - a filter like `x = f()` binds x for later qualifiers and the body
++      // (Phoenix.LiveView.Engine.to_component_static does this). Upgrade: upstream this fix with a test.
++      const filterContext = Interpreter.cloneContext(context);
++
++      if (Type.isTruthy(qualifier.filter(filterContext))) {
++        Interpreter.updateVarsToMatchedValues(filterContext);
++        Interpreter.#walkComprehension(qualifiers, index + 1, filterContext, onLeaf);
+       }
+ 
+       return;
+@@ -2812,11 +2817,14 @@ export default class Interpreter {
+     const qualifier = qualifiers[index];
+ 
+     if (qualifier.type === "filter") {
+-      if (Type.isTruthy(await qualifier.filter(context))) {
++      const filterContext = Interpreter.cloneContext(context);
++
++      if (Type.isTruthy(await qualifier.filter(filterContext))) {
++        Interpreter.updateVarsToMatchedValues(filterContext);
+         await Interpreter.#asyncWalkComprehension(
+           qualifiers,
+           index + 1,
+-          context,
++          filterContext,
+           onLeaf,
+         );
+       }

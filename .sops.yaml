@@ -1,0 +1,20 @@
+# SOPS rules — one age recipient per environment.
+#
+# Per-environment keys rather than one project key: whoever holds UAT's key
+# cannot decrypt production's secrets, so being able to deploy staging reveals
+# nothing about production. The cost is more keys to hold and back up.
+#
+# Fill in the public keys after generating a keypair per environment:
+#
+#   age-keygen -o envs/prod.age.key   # public key printed to stderr
+#   age-keygen -o envs/uat.age.key
+#
+# The private keys never enter the repo — `.gitignore` excludes *.age.key, and
+# the deploy carries each environment's key to its own host as SOPS_AGE_KEY.
+# Keep an offline backup: losing a key loses that environment's secrets.
+creation_rules:
+  - path_regex: envs/prod\.enc\.env$
+    age: <PROD_AGE_PUBLIC_KEY>
+
+  - path_regex: envs/uat\.enc\.env$
+    age: <UAT_AGE_PUBLIC_KEY>

@@ -1,0 +1,26 @@
+diff --git a/lib/hologram/compiler/ir.ex b/lib/hologram/compiler/ir.ex
+index 092ad08..627fc60 100644
+--- a/lib/hologram/compiler/ir.ex
++++ b/lib/hologram/compiler/ir.ex
+@@ -555,6 +555,21 @@ defmodule Hologram.Compiler.IR do
+     |> AST.for_module(beam_source)
+     |> Transformer.transform(%Context{module: module})
+     |> stub_if_server_only(module)
++    |> override_for_client(module)
++  end
++
++  # shortcut: `config :hologram, client_module_overrides: [{Mod, StandIn}]` compiles StandIn's functions as Mod for the
++  # browser (the server keeps the real Mod). For modules whose real code can't run client-side but a few functions can.
++  # StandIn's own name stays reachable. Upgrade: a documented Hologram option, with a cache key like server_only_modules.
++  defp override_for_client(ir, module) do
++    case List.keyfind(Application.get_env(:hologram, :client_module_overrides, []), module, 0) do
++      {^module, stand_in} ->
++        stand_in_ir = for_module(stand_in)
++        %{stand_in_ir | module: %IR.AtomType{value: module}}
++
++      nil ->
++        ir
++    end
+   end
+ 
+   # shortcut: config-driven stubbing for a spike (`config :hologram, server_only_modules: [Mod | {Mod, except: [fun: arity]}]`).

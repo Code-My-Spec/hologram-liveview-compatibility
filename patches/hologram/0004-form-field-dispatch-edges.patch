@@ -1,0 +1,17 @@
+diff --git a/lib/hologram/compiler/call_graph.ex b/lib/hologram/compiler/call_graph.ex
+index 6a488a4..6a8d251 100644
+--- a/lib/hologram/compiler/call_graph.ex
++++ b/lib/hologram/compiler/call_graph.ex
+@@ -98,6 +98,12 @@ defmodule Hologram.Compiler.CallGraph do
+   # (e.g. a struct's calendar field), so static IR analysis can't see the
+   # target. Each edge points at the known implementation.
+   @dynamic_dispatch_edges [
++    # shortcut: map-backed forms only (impl is FormData.Map); add the phoenix_ecto Changeset impl or
++    # a hook for app-declared edges when forms backed by other FormData impls are needed
++    # (Access -> Form.fetch, Form -> impl module read from the struct)
++    {{Access, :get, 3}, {Phoenix.HTML.Form, :fetch, 2}},
++    {{Phoenix.HTML.Form, :input_value, 2}, {Phoenix.HTML.FormData.Map, :input_value, 3}},
++    {{Phoenix.HTML.Form, :input_validations, 2}, {Phoenix.HTML.FormData.Map, :input_validations, 3}},
+     {{Date, :day_of_era, 1}, {Calendar.ISO, :day_of_era, 3}},
+     {{Date, :day_of_week, 2}, {Calendar.ISO, :day_of_week, 4}},
+     {{Date, :day_of_year, 1}, {Calendar.ISO, :day_of_year, 3}},

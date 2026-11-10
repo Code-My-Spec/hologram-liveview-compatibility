@@ -1,0 +1,39 @@
+#!/bin/sh
+# Release overlay: run migrations from a one-off container built on the NEW
+# image, before any traffic moves to it.
+#
+# The deploy wrapper calls this ahead of the traffic swap. Migrating after the
+# swap means every request in the gap runs new code against an old schema,
+# which is the "every request 500s right after a successful deploy" failure.
+#
+# Because the OLD code runs against the NEW schema during the swap window,
+# migrations must be additive. Two-phase anything destructive: ship code that
+# stops reading the column first, drop it in a later deploy.
+#
+# Decrypts the environment first, exactly as `bin/server` does. Both are entry
+# points into the same release and both boot `runtime.exs`, which reads
+# DATABASE_URL — so putting the decryption only in `bin/server` left this one
+# starting with nothing but SOPS_AGE_KEY:
+#
+#   docker run ... /app/bin/migrate
+#   ** (RuntimeError) environment variable DATABASE_URL is missing.
+#
+# which the deploy reports as "Migration failed (exit 1) — the previous version
+# is still serving", naming neither the variable nor the missing decryption.
+set -eu
+cd -P -- "$(dirname -- "$0")"
+
+ENV_NAME="${APP_ENV:-prod}"
+ENV_FILE="../envs/${ENV_NAME}.enc.env"
+
+if [ ! -f "$ENV_FILE" ]; then
+  echo "migrate: no envs/${ENV_NAME}.enc.env in this image — setup encrypts one per environment" >&2
+  exit 1
+fi
+
+if [ -z "${SOPS_AGE_KEY:-}" ]; then
+  echo "migrate: SOPS_AGE_KEY is not set, so ${ENV_FILE} cannot be decrypted" >&2
+  exit 1
+fi
+
+exec sops exec-env "$ENV_FILE" "./hologram_liveview_spike eval 'HologramLiveviewSpike.Release.migrate'"

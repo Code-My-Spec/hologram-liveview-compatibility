@@ -1,0 +1,209 @@
+#!/usr/bin/env bash
+# The only supported way to deploy. Never call `kamal deploy` directly — this
+# wrapper enforces the ordering that keeps a schema change from taking the site
+# down, and refuses to proceed on a dirty tree or a missing key.
+#
+#   bin/deploy                  # production, whole flow
+#   bin/deploy uat              # UAT, whole flow
+#   bin/deploy migrate uat      # build, publish, migrate — no traffic moves
+#   bin/deploy swap uat         # move traffic to the version already migrated
+#
+# The split exists because the setup routine has to *observe* the ordering
+# rather than trust it: it records when the migration finished and when
+# traffic moved, and refuses to swap when its own health check fails. A
+# single command that does both internally gives it nothing to check, and
+# "migrate ran before swap" is the property that keeps a schema change from
+# taking the site down.
+set -euo pipefail
+
+REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
+cd "$REPO_ROOT"
+
+PHASE="all"
+case "${1:-}" in
+  migrate|swap) PHASE="$1"; shift ;;
+esac
+
+ENV_NAME="${1:-prod}"
+case "$ENV_NAME" in
+  prod) CONFIG="config/deploy.yml" ;;
+  uat)  CONFIG="config/deploy.uat.yml" ;;
+  *)    echo "unknown environment: $ENV_NAME (expected prod or uat)" >&2; exit 1 ;;
+esac
+
+# 1. Clean tree. The image is versioned by commit SHA, so deploying with
+#    uncommitted changes would ship something no commit describes.
+if [ -n "$(git status --porcelain)" ]; then
+  echo "working tree is dirty — commit or stash first" >&2
+  git status --short >&2
+  exit 1
+fi
+
+SHA=$(git rev-parse HEAD)
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+
+# 2. Get an image to deploy.
+#
+#    Two callers, two ways. A person runs this and wants CI to have built the
+#    image: push, wait for the workflow, pull what it published from ghcr.io.
+#    Setup runs it having *already* built the image on its own builder and
+#    pushed it to the project's own registry, and says so in CMS_IMAGE.
+#
+#    The second path takes no GitHub credential at all, which is the point —
+#    the registry is on this project's own box and answers on loopback. A
+#    deploy that needed `gh auth token` to pull would fail on any machine
+#    without the gh CLI logged in, including every one of ours.
+if [ -n "${CMS_IMAGE:-}" ]; then
+  # `repo:tag` split from the right, because the registry host carries a port
+  # and therefore a colon of its own: localhost:5000/app:abc123.
+  CMS_IMAGE_PATH="${CMS_IMAGE%:*}"
+  VERSION="${CMS_IMAGE##*:}"
+  # The registry kamal should talk to is the host part of the reference, not
+  # ghcr.io. Derived rather than passed separately, so the two cannot disagree
+  # about where the image is.
+  export CMS_REGISTRY_SERVER="${CMS_IMAGE_PATH%%/*}"
+  # kamal composes its `image:` under `registry.server`, so this is the
+  # repository WITHOUT the host. Set to the whole path it produced
+  # `10.0.0.3:5000/10.0.0.3:5000/app:sha` and the pull failed on a name no
+  # registry has.
+  export CMS_IMAGE_REPO="${CMS_IMAGE_PATH#*/}"
+  echo "deploying the image setup built: $CMS_IMAGE"
+else
+  git push origin "$BRANCH"
+  sleep 5
+
+  RUN_ID=$(gh run list --workflow=build.yml --branch="$BRANCH" --limit=1 \
+    --json databaseId --jq '.[0].databaseId')
+
+  if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+    echo "could not find a CI run for $BRANCH — is the build workflow enabled?" >&2
+    exit 1
+  fi
+
+  gh run watch "$RUN_ID" --exit-status --interval 10
+
+  # KAMAL_REGISTRY_PASSWORD pulls the image from ghcr.io. Only this path needs
+  # it; the registry setup publishes to is not GitHub's.
+  export KAMAL_REGISTRY_PASSWORD
+  KAMAL_REGISTRY_PASSWORD=$(gh auth token)
+
+  if [ -z "${KAMAL_REGISTRY_PASSWORD:-}" ]; then
+    echo "ERROR: KAMAL_REGISTRY_PASSWORD is empty; refusing to deploy" >&2
+    exit 1
+  fi
+
+  VERSION="$SHA"
+fi
+
+# 3. The decryption key, on both paths. Handed to the container so it can
+#    decrypt its own environment at boot.
+#
+#    Checked for emptiness before proceeding: an empty value does not fail
+#    loudly, it produces a container that boots without secrets.
+#    Already in the environment when setup runs this: it holds the key in its
+#    own secret store and deliberately never writes the private half into the
+#    repository. A person running this by hand keeps it in envs/<env>.age.key,
+#    which is gitignored.
+if [ -z "${SOPS_AGE_KEY:-}" ]; then
+  KEY_FILE="envs/${ENV_NAME}.age.key"
+
+  if [ ! -f "$KEY_FILE" ]; then
+    echo "missing $KEY_FILE, and SOPS_AGE_KEY is not set — the deploy carries this to the host" >&2
+    exit 1
+  fi
+
+  export SOPS_AGE_KEY
+  SOPS_AGE_KEY=$(cat "$KEY_FILE")
+fi
+
+if [ -z "${SOPS_AGE_KEY:-}" ]; then
+  echo "ERROR: SOPS_AGE_KEY is empty; refusing to deploy" >&2
+  exit 1
+fi
+
+# 4. Migrate against the NEW image BEFORE traffic moves. The currently
+#    serving container keeps handling requests against the migrated schema
+#    until step 5 swaps it out.
+#
+#    Only when something is already serving. kamal uploads the env files as
+#    part of booting a container and has no command that only pushes them, so
+#    on a host that has never been deployed to there is nothing for the
+#    migration container to read:
+#
+#      docker: open .kamal/apps/<app>/env/roles/web.env: no such file or
+#      directory
+#
+#    That is also the one case where the ordering does not matter: there is no
+#    previous version to keep serving. So the first deploy boots and then
+#    migrates, and every one after it migrates first.
+#    Whether the env files are on the host is not predictable from here.
+#    `kamal app version` prints host and INFO lines with nothing deployed, so
+#    neither its exit status nor whether it printed anything distinguishes a
+#    first deploy — both were tried, and both called every deploy an existing
+#    one. So attempt the migration and read the refusal: docker names the
+#    missing file exactly, and a genuine migration failure does not.
+DEFERRED_MIGRATE=""
+if [ "$PHASE" = "all" ] || [ "$PHASE" = "migrate" ]; then
+  MIGRATE_LOG="$(mktemp)"
+
+  # `-e`, so the migration carries the key rather than reading the host's copy.
+  #
+  # `kamal app exec` starts a one-off container that loads
+  # `.kamal/apps/<app>/env/roles/web.env` from the host, and kamal writes that
+  # file only when it *boots* a container. So the migration ran against the
+  # environment of the last successful boot, not the one being deployed — and
+  # any secret that changed since then was stale exactly when it mattered.
+  #
+  # Rotating SOPS_AGE_KEY deadlocked on this: the new deploy re-encrypts the env
+  # to the new key, the migration reads the old key off the host, sops reports
+  # "no identity matched any of the recipients" against a file whose recipient
+  # is correct, and the deploy that would have replaced the host's copy is the
+  # one that cannot finish. Observed on a drill box — the delivered key derived
+  # to age1samcfel… while the file wanted age1vcf3lc4….
+  #
+  # The value is already in this shell (step 3 above insists on it), so handing
+  # it to the container removes the dependency on host state entirely.
+  if kamal app exec --version="$VERSION" -c "$CONFIG" -e "SOPS_AGE_KEY:$SOPS_AGE_KEY" "/app/bin/migrate" \
+      >"$MIGRATE_LOG" 2>&1; then
+    cat "$MIGRATE_LOG"
+    echo "migrated=$VERSION"
+  elif grep -q "env/roles/.*\.env: no such file or directory" "$MIGRATE_LOG"; then
+    DEFERRED_MIGRATE=1
+    # Machine-readable, like `migrated=` and `swapped=` below. The caller
+    # cannot health-check a previous version that does not exist.
+    #
+    # Not the only place that knows any more, and it must not be: this branch
+    # only runs when migrate FAILS for want of host env files, and migrate
+    # stopped needing those once it began decrypting secrets baked into the
+    # image. A first deploy then succeeded, printed nothing, and every new
+    # site health-checked a host serving nothing. Release.migrate/0 now prints
+    # the same marker when it finds a database with no migrations applied,
+    # which covers the success path this branch cannot see.
+    echo "first_deploy=1"
+    echo "nothing has booted here yet, so there is no env on the host -"
+    echo "migrating after the first boot instead"
+  else
+    cat "$MIGRATE_LOG" >&2
+    rm -f "$MIGRATE_LOG"
+    exit 1
+  fi
+
+  rm -f "$MIGRATE_LOG"
+fi
+
+# 5. Swap traffic. The proxy gates this on /health, so an unhealthy version
+#    never becomes the live one.
+if [ "$PHASE" = "all" ] || [ "$PHASE" = "swap" ]; then
+  kamal deploy --skip-push --version="$VERSION" -c "$CONFIG" "${@:2}"
+  echo "swapped=$VERSION"
+
+  # The first deploy's migration, now that booting has put the env files on
+  # the host. The healthcheck has already passed, so this runs against a
+  # container that is up.
+  if [ -n "$DEFERRED_MIGRATE" ] && { [ "$PHASE" = "all" ] || [ "$PHASE" = "migrate" ]; }; then
+    kamal app exec --version="$VERSION" -c "$CONFIG" -e "SOPS_AGE_KEY:$SOPS_AGE_KEY" "/app/bin/migrate"
+    echo "migrated=$VERSION"
+  fi
+  echo
+  echo "deployed $VERSION to $ENV_NAME"
+fi

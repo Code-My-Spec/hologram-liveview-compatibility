@@ -1,0 +1,27 @@
+diff --git a/assets/js/erlang/telemetry.mjs b/assets/js/erlang/telemetry.mjs
+new file mode 100644
+index 0000000..2dda409
+--- /dev/null
++++ b/assets/js/erlang/telemetry.mjs
+@@ -0,0 +1,21 @@
++"use strict";
++
++import Interpreter from "../interpreter.mjs";
++
++// IMPORTANT!
++// If the given ported Erlang function calls other Erlang functions, then list such dependencies in the "Deps" comment (see :erlang./=/2 for an example).
++// Also, in such case add respective call graph edges in Hologram.CallGraph.list_runtime_mfas/1.
++
++const Erlang_Telemetry = {
++  // Start span/3
++  // shortcut: the browser has no telemetry handlers, so a span just runs its function and returns the result, dropping the
++  // events and metadata. Upgrade by dispatching to handlers the app registers on the client.
++  "span/3": (_eventPrefix, _startMetadata, spanFunction) => {
++    // spanFunction returns {result, stopMetadata}
++    return Interpreter.callAnonymousFunction(spanFunction, []).data[0];
++  },
++  // End span/3
++  // Deps: []
++};
++
++export default Erlang_Telemetry;

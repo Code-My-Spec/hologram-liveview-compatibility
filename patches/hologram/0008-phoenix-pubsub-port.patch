@@ -1,0 +1,60 @@
+diff --git a/assets/js/elixir/phoenix_pubsub.mjs b/assets/js/elixir/phoenix_pubsub.mjs
+new file mode 100644
+index 0000000..c851cf0
+--- /dev/null
++++ b/assets/js/elixir/phoenix_pubsub.mjs
+@@ -0,0 +1,16 @@
++"use strict";
++
++import Bitstring from "../bitstring.mjs";
++import Type from "../type.mjs";
++
++// shortcut: the browser has no PubSub; subscribe/3 only records the topic (ignoring the pubsub name)
++// for the page to forward to the server, which bridges it. No unsubscribe, no per-pubsub scoping.
++// Upgrade: port unsubscribe/2 and key topics by pubsub name when a second PubSub matters.
++const Elixir_Phoenix_PubSub = {
++  "subscribe/3": (_pubsub, topic, _opts) => {
++    (globalThis.__lvTopics ??= new Set()).add(Bitstring.toText(topic));
++    return Type.atom("ok");
++  },
++};
++
++export default Elixir_Phoenix_PubSub;
+diff --git a/assets/js/hologram.mjs b/assets/js/hologram.mjs
+index 5b5207f..0964e66 100644
+--- a/assets/js/hologram.mjs
++++ b/assets/js/hologram.mjs
+@@ -62,6 +62,7 @@ import ManuallyPortedElixirIO from "./elixir/io.mjs";
+ import ManuallyPortedElixirKernel from "./elixir/kernel.mjs";
+ import ManuallyPortedElixirString from "./elixir/string.mjs";
+ import ManuallyPortedElixirStringTokenizer from "./elixir/string/tokenizer.mjs";
++import ManuallyPortedElixirPhoenixPubSub from "./elixir/phoenix_pubsub.mjs";
+ import ManuallyPortedElixirTask from "./elixir/task.mjs";
+ import ManuallyPortedElixirURI from "./elixir/uri.mjs";
+ 
+@@ -1316,6 +1317,13 @@ export default class Hologram {
+       ManuallyPortedElixirStringTokenizer["tokenize/1"],
+     );
+ 
++    Interpreter.defineManuallyPortedFunction(
++      "Phoenix.PubSub",
++      "subscribe/3",
++      "public",
++      ManuallyPortedElixirPhoenixPubSub["subscribe/3"],
++    );
++
+     Interpreter.defineManuallyPortedFunction(
+       "Task",
+       "await/1",
+diff --git a/lib/hologram/compiler/call_graph.ex b/lib/hologram/compiler/call_graph.ex
+index f845bb6..0024ab8 100644
+--- a/lib/hologram/compiler/call_graph.ex
++++ b/lib/hologram/compiler/call_graph.ex
+@@ -416,6 +416,7 @@ defmodule Hologram.Compiler.CallGraph do
+     {IO, :warn_once, 3},
+     {Kernel, :inspect, 1},
+     {Kernel, :inspect, 2},
++    {Phoenix.PubSub, :subscribe, 3},
+     {String, :contains?, 2},
+     {String, :downcase, 1},
+     {String, :downcase, 2},

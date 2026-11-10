@@ -1,0 +1,78 @@
+# Production deploy configuration.
+#
+# One file per environment. Each names its own host and its own APP_ENV, so a
+# single MIX_ENV=prod image serves both environments and nothing but this file
+# decides which one a deploy targets. A shared config with a swapped variable
+# is how a UAT deploy ends up pointing at production.
+#
+# Deploy with `bin/deploy` — never `kamal deploy` directly. The wrapper
+# migrates against the new image before moving traffic.
+service: hologram_liveview_spike
+image: <%= ENV["CMS_IMAGE_REPO"] || "hologram_liveview_spike" %>
+
+servers:
+  web:
+    hosts:
+      - <%= ENV["CMS_DEPLOY_HOST_IP"] || "<PROD_HOST_IP>" %>
+    options:
+      # Pre-attach to the shared network at create time so the container can
+      # resolve the database host at boot rather than after a retry.
+      network: db_net
+
+proxy:
+  ssl: true
+  host: <%= ENV["CMS_DEPLOY_HOST"] || "<PROD_HOST>" %>
+  app_port: 4000
+  healthcheck:
+    # Outside every router pipeline and excluded from force_ssl — see
+    # config/runtime.exs. The proxy gates the traffic swap on this.
+    path: /health
+
+registry:
+  server: <%= ENV["CMS_REGISTRY_SERVER"] || "ghcr.io" %>
+  username: <%= ENV["KAMAL_REGISTRY_USERNAME"] || "<GITHUB_USER>" %>
+  password:
+    - KAMAL_REGISTRY_PASSWORD
+
+builder:
+  # amd64: production runs x64 in the US, while UAT runs on a cheaper European
+  # ARM box. CI publishes both architectures as one manifest list so the same
+  # commit deploys to either — but this must match the host or the container
+  # starts and immediately dies.
+  arch: amd64
+  # Deploys pass --skip-push: CI built and pushed the image, this only pulls it.
+  local: true
+
+env:
+  clear:
+    # APP_ENV, not MIX_ENV. One prod image serves both environments and this
+    # is what selects which secrets it decrypts.
+    APP_ENV: prod
+    PHX_HOST: <%= ENV["CMS_DEPLOY_HOST"] || "<PROD_HOST>" %>
+    PORT: 4000
+  secret:
+    # The only secret the deploy tool carries. Everything else is decrypted
+    # at boot from the SOPS-encrypted env file in the release.
+    - SOPS_AGE_KEY
+
+ssh:
+  user: root
+  # Which key, and only that key. Without this, kamal's net-ssh offers every
+  # identity the agent holds and a box with the default `MaxAuthTries 6`
+  # disconnects before reaching the right one:
+  #
+  #   ERROR (Net::SSH::Disconnect): disconnected: Too many authentication
+  #   failures (2)
+  #
+  # Setup passes the path to the key it provisioned the box with. A person
+  # running this by hand falls through to their own agent, which is what they
+  # want.
+<% if ENV["CMS_SSH_KEY_PATH"] %>  keys_only: true
+  keys: [ "<%= ENV["CMS_SSH_KEY_PATH"] %>" ]
+<% end %>
+<% if ENV["CMS_SSH_PORT"] %>  # Unset for any real box, which is on 22. This exists so the deploy can be
+  # aimed at a local container fleet over a published loopback port — and the
+  # point of that fleet is to run this same config rather than a parallel one,
+  # so it gets a knob instead of a copy.
+  port: <%= ENV["CMS_SSH_PORT"] %>
+<% end %>

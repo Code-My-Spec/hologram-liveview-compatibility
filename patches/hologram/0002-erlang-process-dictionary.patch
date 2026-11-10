@@ -1,0 +1,50 @@
+diff --git a/assets/js/erlang/erlang.mjs b/assets/js/erlang/erlang.mjs
+index 26ccdbd..35c0600 100644
+--- a/assets/js/erlang/erlang.mjs
++++ b/assets/js/erlang/erlang.mjs
+@@ -2158,6 +2158,27 @@ const Erlang = {
+   // End function_exported/3
+   // Deps: []
+ 
++  // Start erase/1
++  "erase/1": (key) => {
++    // shortcut: one global map for the whole page (the browser is one "process"), upgrade if per-process semantics are ever needed
++    const dict = (globalThis.__holoProcessDict ??= new Map());
++    const encoded = Type.encodeMapKey(key);
++    const old = dict.get(encoded);
++    dict.delete(encoded);
++    return old === undefined ? Type.atom("undefined") : old;
++  },
++  // End erase/1
++  // Deps: []
++
++  // Start get/1
++  "get/1": (key) => {
++    const dict = (globalThis.__holoProcessDict ??= new Map());
++    const value = dict.get(Type.encodeMapKey(key));
++    return value === undefined ? Type.atom("undefined") : value;
++  },
++  // End get/1
++  // Deps: []
++
+   // Start hd/1
+   "hd/1": (list) => {
+     if (!Type.isList(list) || list.data.length === 0) {
+@@ -2169,6 +2190,17 @@ const Erlang = {
+   // End hd/1
+   // Deps: []
+ 
++  // Start put/2
++  "put/2": (key, value) => {
++    const dict = (globalThis.__holoProcessDict ??= new Map());
++    const encoded = Type.encodeMapKey(key);
++    const old = dict.get(encoded);
++    dict.set(encoded, value);
++    return old === undefined ? Type.atom("undefined") : old;
++  },
++  // End put/2
++  // Deps: []
++
+   // Start insert_element/3
+   "insert_element/3": (index, tuple, value) => {
+     const raiseBadarg = () => {

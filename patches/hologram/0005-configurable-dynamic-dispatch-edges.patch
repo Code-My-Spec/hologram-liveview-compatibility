@@ -1,0 +1,22 @@
+diff --git a/lib/hologram/compiler/call_graph.ex b/lib/hologram/compiler/call_graph.ex
+index 6a8d251..f845bb6 100644
+--- a/lib/hologram/compiler/call_graph.ex
++++ b/lib/hologram/compiler/call_graph.ex
+@@ -94,6 +94,8 @@ defmodule Hologram.Compiler.CallGraph do
+   # meaning 0).
+   @dump_version 1
+ 
++  # shortcut: apps add edges with `config :hologram, dynamic_dispatch_edges: [{{CallerMod, :fun, arity}, {CalleeMod, :fun, arity}}]`;
++  # not part of the call graph cache key. Upgrade: a documented option that invalidates the cache.
+   # Edges for dynamic dispatch: the caller reads the callee module from data
+   # (e.g. a struct's calendar field), so static IR analysis can't see the
+   # target. Each edge points at the known implementation.
+@@ -553,7 +555,7 @@ defmodule Hologram.Compiler.CallGraph do
+     update_graph(pid, fn graph ->
+       graph
+       |> Digraph.add_edges(client_runtime_edges)
+-      |> Digraph.add_edges(@dynamic_dispatch_edges)
++      |> Digraph.add_edges(@dynamic_dispatch_edges ++ Application.get_env(:hologram, :dynamic_dispatch_edges, []))
+       |> Digraph.add_edges(@erlang_mfa_edges)
+     end)
+ 

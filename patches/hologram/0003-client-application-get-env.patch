@@ -1,0 +1,22 @@
+diff --git a/assets/js/erlang/application.mjs b/assets/js/erlang/application.mjs
+index 95ebd0e..c946f14 100644
+--- a/assets/js/erlang/application.mjs
++++ b/assets/js/erlang/application.mjs
+@@ -9,6 +9,17 @@ import Type from "../type.mjs";
+ // Also, in such case add respective call graph edges in Hologram.CallGraph.list_runtime_mfas/1.
+ 
+ const Erlang_Application = {
++  // shortcut: the client carries no app env, so every key is :undefined (or the default); upgrade by shipping selected config to the client
++  // Start get_env/2
++  "get_env/2": (_app, _key) => Type.atom("undefined"),
++  // End get_env/2
++  // Deps: []
++
++  // Start get_env/3
++  "get_env/3": (_app, _key, defaultValue) => defaultValue,
++  // End get_env/3
++  // Deps: []
++
+   // The application a module belongs to is read from the metadata its bundle
+   // registered, which happens only when client stacktraces are enabled. A module
+   // with no entry - a ported Erlang module, or any module at all when the

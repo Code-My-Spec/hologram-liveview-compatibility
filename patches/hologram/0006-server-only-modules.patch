@@ -1,0 +1,54 @@
+diff --git a/lib/hologram/compiler/ir.ex b/lib/hologram/compiler/ir.ex
+index 296ec52..092ad08 100644
+--- a/lib/hologram/compiler/ir.ex
++++ b/lib/hologram/compiler/ir.ex
+@@ -554,6 +554,49 @@ defmodule Hologram.Compiler.IR do
+     module
+     |> AST.for_module(beam_source)
+     |> Transformer.transform(%Context{module: module})
++    |> stub_if_server_only(module)
++  end
++
++  # shortcut: config-driven stubbing for a spike (`config :hologram, server_only_modules: [Mod | {Mod, except: [fun: arity]}]`).
++  # Every function body of such a module becomes `:erlang.error(:hologram_server_only)`, so the module's dependencies never
++  # reach the client bundle and a browser-side call raises something the page can catch and retry on the server.
++  # The IR cache is not keyed on this config (clear the compiler PLTs when it changes).
++  # Upgrade: a proper Hologram option with a documented error, and a cache key.
++  defp stub_if_server_only(ir, module) do
++    entry =
++      Enum.find_value(Application.get_env(:hologram, :server_only_modules, []), fn
++        ^module -> []
++        {^module, opts} -> Keyword.get(opts, :except, [])
++        _other -> nil
++      end)
++
++    if entry == nil do
++      ir
++    else
++      stub_body = %IR.Block{
++        expressions: [
++          %IR.RemoteFunctionCall{
++            module: %IR.AtomType{value: :erlang},
++            function: :error,
++            args: [%IR.AtomType{value: :hologram_server_only}],
++            line: nil
++          }
++        ]
++      }
++
++      expressions =
++        Enum.map(ir.body.expressions, fn
++          %IR.FunctionDefinition{name: name, arity: arity, clause: clause} = definition ->
++            if {name, arity} in entry,
++              do: definition,
++              else: %{definition | clause: %{clause | body: stub_body}}
++
++          other ->
++            other
++        end)
++
++      %{ir | body: %{ir.body | expressions: expressions}}
++    end
+   end
+ 
+   @doc """

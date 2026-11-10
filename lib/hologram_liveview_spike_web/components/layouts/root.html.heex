@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="csrf-token" content={get_csrf_token()} />
+    <.live_title default="HologramLiveviewSpike" suffix=" · Phoenix Framework" phx-no-format>{assigns[:page_title]}</.live_title>
+    <link phx-track-static rel="stylesheet" href={~p"/assets/css/app.css"} />
+    <script>
+      // Preview bridge. Ships in every build and does nothing at all unless
+      // this page is inside a frame opened by a CodeMySpec preview — checked
+      // against who framed it, not merely whether it is framed.
+      //
+      // Not deferred, and ahead of app.js, so an error thrown while the app
+      // boots is still caught. A render that fails on first paint is exactly
+      // the one worth reporting.
+      (() => {
+        const ORIGINS = [
+          "https://codemyspec.com",
+          "https://dev.codemyspec.com",
+          "http://localhost:4000"
+        ];
+
+        // Not framed: the ordinary case, in production, forever.
+        if (window.parent === window) return;
+
+        // A framed page cannot read its parent's origin, so the referrer is
+        // what there is. Absent or unrecognised means somebody else framed
+        // this app, and the bridge stays shut — it neither reports nor listens.
+        let framer;
+        try {
+          framer = new URL(document.referrer).origin;
+        } catch (_) {
+          return;
+        }
+        if (!ORIGINS.includes(framer)) return;
+
+        // Buffered until the host proves it is listening. The host's hook
+        // mounts when its LiveView connects, which is after this page has
+        // loaded and possibly already thrown — and postMessage has no replay,
+        // so anything sent before then is simply gone. That is exactly the
+        // first-paint failure this script is not deferred in order to catch,
+        // so losing it would defeat the point of catching it.
+        let listening = false;
+        const pending = [];
+
+        const post = (type, payload) =>
+          window.parent.postMessage({ source: "cms-preview", type, payload }, framer);
+
+        const send = (type, payload) =>
+          listening ? post(type, payload) : pending.push([type, payload]);
+
+        window.addEventListener("error", (e) =>
+          send("error", {
+            message: e.message,
+            source: e.filename,
+            line: e.lineno,
+            column: e.colno,
+            stack: e.error && e.error.stack
+          })
+        );
+
+        window.addEventListener("unhandledrejection", (e) =>
+          send("error", { message: String(e.reason), stack: e.reason && e.reason.stack })
+        );
+
+        // LiveView reports its own death, which a window error does not catch:
+        // the crash happened on the server and arrives here as a reload.
+        window.addEventListener("phx:error", (e) =>
+          send("error", { message: "LiveView error", detail: e.detail })
+        );
+
+        // Any recognised message from the host means someone is on the other
+        // end. Flush what happened before they got there, in order, then run
+        // live from here.
+        window.addEventListener("message", (e) => {
+          if (e.origin !== framer) return;
+          if (!e.data || e.data.source !== "cms-preview-host") return;
+
+          if (!listening) {
+            listening = true;
+            pending.splice(0).forEach(([type, payload]) => post(type, payload));
+          }
+
+          if (e.data.type === "ping") post("pong", {});
+        });
+
+        send("ready", { url: window.location.href });
+      })();
+    </script>
+    <script defer phx-track-static type="text/javascript" src={~p"/assets/js/app.js"}>
+    </script>
+    <script>
+      (() => {
+        const systemTheme = () => matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+
+        const setTheme = (theme) => {
+          if (theme === "system") {
+            localStorage.removeItem("phx:theme");
+            document.documentElement.setAttribute("data-theme", systemTheme());
+            document.documentElement.setAttribute("data-theme-source", "system");
+          } else {
+            localStorage.setItem("phx:theme", theme);
+            document.documentElement.setAttribute("data-theme", theme);
+            document.documentElement.setAttribute("data-theme-source", "user");
+          }
+        };
+        if (!document.documentElement.hasAttribute("data-theme")) {
+          setTheme(localStorage.getItem("phx:theme") || "system");
+        }
+        window.addEventListener("storage", (e) => e.key === "phx:theme" && setTheme(e.newValue || "system"));
+        
+        window.addEventListener("phx:set-theme", (e) => setTheme(e.target.dataset.phxTheme));
+
+        matchMedia("(prefers-color-scheme: dark)").addEventListener("change", (e) => {
+          if (document.documentElement.getAttribute("data-theme-source") === "system") {
+            document.documentElement.setAttribute("data-theme", systemTheme());
+          }
+        });
+      })();
+    </script>
+  </head>
+  <body>
+    {@inner_content}
+  </body>
+</html>

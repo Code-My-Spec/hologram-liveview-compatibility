@@ -1,0 +1,70 @@
+# UAT deploy configuration.
+#
+# Its own host and its own APP_ENV — the discriminator that keeps UAT reading
+# UAT's secrets and production reading production's, from one shared image.
+#
+# Setup starts both environments on a single box and can relocate production
+# to its own later; when that happens only the host below changes.
+service: hologram_liveview_spike-uat
+image: <%= ENV["CMS_IMAGE_REPO"] || "hologram_liveview_spike" %>
+
+servers:
+  web:
+    hosts:
+      - <%= ENV["CMS_DEPLOY_HOST_IP"] || "<UAT_HOST_IP>" %>
+    options:
+      network: db_net
+
+proxy:
+  ssl: true
+  host: <%= ENV["CMS_DEPLOY_HOST"] || "<UAT_HOST>" %>
+  app_port: 4000
+  healthcheck:
+    path: /health
+
+registry:
+  server: <%= ENV["CMS_REGISTRY_SERVER"] || "ghcr.io" %>
+  username: <%= ENV["KAMAL_REGISTRY_USERNAME"] || "<GITHUB_USER>" %>
+  password:
+    - KAMAL_REGISTRY_PASSWORD
+
+builder:
+  # arm64: UAT runs on a cheaper European ARM box (Hetzner cax line), while
+  # production runs x64 in the US. Both architectures are published by CI as
+  # one manifest list, so the same commit deploys to either — but this must
+  # match the host or the container starts and immediately dies.
+  arch: arm64
+  local: true
+
+env:
+  clear:
+    APP_ENV: uat
+    PHX_HOST: <%= ENV["CMS_DEPLOY_HOST"] || "<UAT_HOST>" %>
+    PORT: 4000
+  secret:
+    # UAT's own age key. Per-environment keys mean this one cannot decrypt
+    # production's secrets, so being able to deploy UAT reveals nothing about
+    # production.
+    - SOPS_AGE_KEY
+
+ssh:
+  user: root
+  # Which key, and only that key. Without this, kamal's net-ssh offers every
+  # identity the agent holds and a box with the default `MaxAuthTries 6`
+  # disconnects before reaching the right one:
+  #
+  #   ERROR (Net::SSH::Disconnect): disconnected: Too many authentication
+  #   failures (2)
+  #
+  # Setup passes the path to the key it provisioned the box with. A person
+  # running this by hand falls through to their own agent, which is what they
+  # want.
+<% if ENV["CMS_SSH_KEY_PATH"] %>  keys_only: true
+  keys: [ "<%= ENV["CMS_SSH_KEY_PATH"] %>" ]
+<% end %>
+<% if ENV["CMS_SSH_PORT"] %>  # Unset for any real box, which is on 22. This exists so the deploy can be
+  # aimed at a local container fleet over a published loopback port — and the
+  # point of that fleet is to run this same config rather than a parallel one,
+  # so it gets a knob instead of a copy.
+  port: <%= ENV["CMS_SSH_PORT"] %>
+<% end %>
